@@ -53,7 +53,63 @@ def EstimateFundamentalMatrix(pts1, pts2):
 
     return F
 
-        
+def GetInlierRANSAC(pts1, pts2, threshold=0.001, max_iters=2000):
+    """
+    Estimate F and inliners via RANSAC
+    Args:
+        pts1, pts2 : Nx2 arrays of corresponding points
+        threshold: inliner threshold for Sampson epipolar distance
+        max_iters: number of RANSAC iterations
+    Returns:
+        F_best: 3x3 fundamental matric with rank=2
+        inliers1, inliers2: The subset of inlier correspondences
+    """
+    pts1_h = np.hstack([pts1, np.ones(pts1.shape[0], 1)])
+    pts2_h = np.hstack([pts2, np.ones(pts2.shape[0], 1)])
+
+    best_inliers_count = 0
+    F_best = None
+    inlier_mask_best = None
+
+    np.random.seed(42)
+
+    for _ in range(max_iters):
+        #Randomly sample 8 points
+        sample_indices = np.random.choice(pts1.shape[0], 8, replace=False)
+        sample_pts1 = pts1[sample_indices]
+        sample_pts2 = pts2[sample_indices]
+
+        #Estimate F from these 8 points
+        F_candidate = EstimateFundamentalMatrix(sample_pts1, sample_pts2)
+
+        # Compute errors (Sampson distance)
+        # d = (x'^T F x)^2 / ( (F x)_0^2 + (F x)_1^2 + (F^T x')_0^2 + (F^T x')_1^2 )
+        Fx1 = (F_candidate @ pts1_h.T).T
+        Ftx2 = (F_candidate.T @ pts2_h.T).T
+        x2tFx1 = np.sum(pts2_h * Fx1, axis=1)
+
+        denom = Fx1[:,0]**2 + Fx1[:,1]**2 + Ftx2[:,0]**2 + Ftx2[:,1]**2
+        denom[denom < 1e-12] = 1e-12
+        dist = (x2tFx1**2) / denom
+
+        inlier_mask = dist < threshold
+        inlier_count = np.sum(inlier_mask)      
+
+        if inlier_count > best_inliers_count:
+            best_inliers_count = inlier_count
+            F_best = F_candidate
+            inlier_mask_best = inlier_mask
+            
+    #Final inliers
+    inliers1 = pts1[inlier_mask_best]
+    inliers2 = pts2[inlier_mask_best]
+
+    # Re-estimate F using all inliers
+    F_best = EstimateFundamentalMatrix(inliers1, inliers2)
+
+    return F_best, inliers1, inliers2
+
+
 
 
 

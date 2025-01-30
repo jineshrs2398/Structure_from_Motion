@@ -109,6 +109,24 @@ def GetInlierRANSAC(pts1, pts2, threshold=0.001, max_iters=2000):
 
     return F_best, inliers1, inliers2
 
+def EssentialMatrixFromFundamentalMatrix(F, K):
+    """
+    Compute E from F, i.e. E = K^T * F * K, then
+    enforce the singular values of E to be (1,1,0)
+
+    Args:
+        F: 3x3 fundamental matrix
+        K: 3x3 camera intrinsic matrix
+    Returns:
+        E: 3x3 essential matrix
+    """
+    E_approx = K.T @ F @ K
+    U, S, Vt = np.linalg.svd(E_approx)
+
+    avg = (S[0] + S[1])/2.0
+    E = U @ np.diag([avg, avg, 0]) @ Vt
+
+    return E
 
 
 

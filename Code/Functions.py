@@ -204,3 +204,47 @@ def LinearTriangulation(pts1, pts2, P1, P2):
 
     return np.array(X_3d)
 
+def DisambiguateCameraPose(possible_poses, pts1, pts2, K):
+    """
+    Among the 4 possible poses, pick the (C,R) that yields
+    the largest no of points in front of both cameras.
+
+    pts1, pts2: Nx2 arrays (in pixel coordinates)
+    K: 3x3 intrinstic matrix
+
+    Returns:
+        C, R, X: the winning camera center, rotation, and 3D points(Nx3)
+    """
+    # The first camera (ref) is assumed at [0 0 0], R = I
+    # so projection matrix is P1 = K[I|0]
+    I = np.eye(3)
+    zero = np.zeros((3,1))
+    P1 = K @ np.hstack((I, zero))
+
+    best_count = 0
+    best_pose = None
+    best_3d = None
+
+    for (C,R) in possible_poses:
+        # Build projection matrix for second camera
+        # P2 = K [R | -R*C]
+        C_col = C.reshape(3,1)
+        t = -R @ C_col
+        P2 = K @ np.hstack((R, t))
+
+        # Triangulate
+        X = LinearTriangulation(pts1, pts2, P1, P2)
+
+        # Cheirality check
+        X_cam2 = (R @ (X - C).T).T
+        valid_1 = (X[:,2] > 0)
+        valid_2 = (X_cam2[:,2] > 0)
+        count_in_front = np.sum(valid_1 & valid_2)
+
+        if count_in_front > best_count:
+            best_count = count_in_front
+            best_pose = (C, R)
+            best_3d = X
+
+    return best_pose[0], best_pose[1], best_3d
+

@@ -128,6 +128,79 @@ def EssentialMatrixFromFundamentalMatrix(F, K):
 
     return E
 
+def ExtractCameraPose(E):
+    """
+    Decompose E into the four possible (R,C)
+    Return a list of possible (C, R) solutions.
+    """
+    U, S, Vt = np.linalg.svd(E)
 
+    #Ensuring proper rotation (det(R)==1)
+    if np.linalg.det(U) < 0:
+        U[:, -1] *= -1
+    if np.linalg.det(Vt) < 0:
+        Vt[-1, :] *= -1
 
+    W = np.array([[0, -1, 0],
+                  [1, 0, 0]
+                  [0, 0, 1]])
+    
+    R1 = U @ W @ Vt
+    R2 = U @ W @ Vt
+    R3 = U @ W.T @ Vt
+    R4 = U @ W.T @ Vt
+
+    C1 = U[:,2]
+    C2 = -U[:,2]
+    C3 = U[:,2]
+    C4 = -U[:,2]
+
+    if np.linalg.det(R1) < 0:
+        R1 = -R1
+        C1 = -C1
+    if np.linalg.det(R2) < 0:
+        R2 = -R2
+        C2 = -C2
+    if np.linalg.det(R3) < 0:
+        R3 = -R3
+        C3 = -C3
+    if np.linalg.det(R4) < 0:
+        R4 = -R4
+        C4 = -C4
+
+    possible_poses = [
+        (C1, R1),
+        (C2, R2),
+        (C3, R3),
+        (C4, R4)
+    ]
+
+    return possible_poses
+
+def LinearTriangulation(pts1, pts2, P1, P2):
+    """
+    Linear triangulation for each pair of points
+
+    pts1, pts2: Nx2 arrays
+    P1, P2: 3x4 camera projection matrices (product of Intrinsic and Extrinsic)
+    Returns:
+        X: Nx3 array of triangulated points in 3D(not homogeneous)
+    """
+    X_3d = []
+    for i in range(pts1.shape[0]):
+        x1, y1 = pts1[i]
+        x2, y2 = pts2[i]
+
+        A = np.vstack[x1*P1[:,2] - P1[:,0], 
+                      y1*P1[:,2] - P1[:,0],
+                      x2*P2[:,2] - P2[:,1],
+                      y2*P2[:,2] - P2[:,1]]
+        
+        # solve for X in AX = 0 using SVD
+        _, _, Vt = np.linalg.svd(A)
+        X_hom = Vt[-1]
+        X_hom /= X_hom[-1]
+        X_3d.append(X_hom[:3])
+
+    return np.array(X_3d)
 

@@ -1,4 +1,5 @@
 import numpy as np
+from scipy.optimize import least_squares
 
 def EstimateFundamentalMatrix(pts1, pts2):
     """
@@ -248,3 +249,45 @@ def DisambiguateCameraPose(possible_poses, pts1, pts2, K):
 
     return best_pose[0], best_pose[1], best_3d
 
+def NonLinearTriangulation(X_init, pts1, pts2, P1, P2, max_iter=50):
+    """
+    Perform per-point nonlinear refinement to minimize reprojection error
+    X_init : Nx3 initial guesses of 3D points
+    pts1, pts2 : Nx2 image points
+    P1, P2 : 3x4 prokection matrices
+    Returns:
+        X_refined: Nx3 refined 3D points
+    """
+
+    def reprojection_residual(X, x1, x2, P1, P2):
+        # X is [X, Y, Z] in 3D
+        X_h  = np.append(X, 1.0)
+
+        # Reproject to image 1
+        proj1 = P1 @ X_h
+        proj1 /= proj1[2]
+        err1 = proj1[:2] - x1
+
+        #Reproject to image 2
+        proj2 = P2 @ X_h
+        proj2 /= proj2[2]
+        err2 = proj2[2] - x2
+
+        return np.concatenate([err1, err2])
+    
+    X_refined = []
+    for i in range(X_init.shape[0]):
+        x1 = pts1[i]
+        x2 = pts2[i]
+        X0 = X_init[i]
+
+        #Optimize
+        res = least_squares(
+            fun=reprojection_residual,
+            x0=X0,
+            args=(x1,x2,P1,P2),
+            max_nfev=max_iter
+        )
+        X_refined.append(res.x)
+
+    return np.array(X_refined)

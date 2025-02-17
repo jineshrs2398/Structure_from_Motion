@@ -333,6 +333,10 @@ def LinearPnP(X_3d, x_2d, K):
         R = -R
         t_approx = -t_approx
 
+    # s is a scale factor, get scale frm S
+    # scale can be taken average of S or S[0] etc
+    # typically, t = (1/S[0]) * t_approx if S is diagonal
+
     scale = np.mean(S)
     t = t_approx/scale
 
@@ -340,4 +344,75 @@ def LinearPnP(X_3d, x_2d, K):
 
     return C, R
 
+def PnPRANSAC(X_3d, x_2d, K, threshold=3.0, max_iters=1000):
+    """ 
+    RANSAC-based robust PnP from 2D-3D correspondences.
+    X_3d: Nx3
+    x_2d: Nx2
+    K: 3x3
+    threshold: pixel reprojection eror threshold
+    max_iters: RANSAC iterations
+    returns:
+        best_C, best_R, inliers mask
+    """
+    N = X_3d.shape[0]
+    best_inliers_count = 0
+    best_C, best_R = None, None
+    best_mask = None
+
+    np.random.seed(42)
+    for _ in range(max_iters):
+        sample_indices = np.random.choice(N, 6, replace=False)
+        X_sample = X_3d[sample_indices]
+        x_sample = x_2d[sample_indices]
+
+        try:
+            C_candidate, R_candidate = LinearPnP(X_sample, x_sample, K)
+        except:
+            continue
+
+        # count inliers
+        # project all X_3d to see how close to x_2d
+        inliers_mask = compute_pnp_inliers(X_3d, x_2d, C_candidate, R_candidate, K, threshold)
+        inliers_count = np.sum(inliers_mask)
+
+        if inliers_count > best_inliers_count:
+            best_inliers_count = inliers_count
+            best_C = C_candidate
+            best_R = R_candidate
+            best_mask = inliers_mask
+
+    # Re-estimate using all inliers
+    if best_mask is not None and np.sum(best_mask) >=0:
+        X_in = X_3d[best_mask]
+        x_in = x_2d[best_mask]
+        best_C, best_R = LinearPnP(X_in, x_in, K)
+
+    return best_C, best_R, best_mask 
+
+def compute_pnp_inliers(X_3d, x_2d, C, R, K, threshold):
+    """ 
+    Compute which 2D-3D correspondences are inliers
+    by projecting X_3d into the camera (C,R) and
+    checking distance to x_2d in pixels
+    """
+    N = X_3d.shape[0]
+    X_3d_h = np.hstack([X_3d, np.ones((N, 1))])
+
+    # Build projection P = K[R | -R*C]
+    C_col = C.reshape(3,1)
+    t = -R @ C_col
+    P = K @ np.hstack((R, t))
+
+    #Project
+    proj = (P @ X_3d_h.T).T
+    proj[:,0] /= proj[:2]
+    proj[:,1] /= proj[:2]
+
+    # Compare with x_2d
+    diff = proj[:,:2] - x_2d
+    errors = np.linalg.norm(diff, axis=1)
+    inliers_mask = errors < threshold
     
+    return inliers_mask
+

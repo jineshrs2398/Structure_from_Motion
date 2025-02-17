@@ -254,7 +254,7 @@ def NonLinearTriangulation(X_init, pts1, pts2, P1, P2, max_iter=50):
     Perform per-point nonlinear refinement to minimize reprojection error
     X_init : Nx3 initial guesses of 3D points
     pts1, pts2 : Nx2 image points
-    P1, P2 : 3x4 prokection matrices
+    P1, P2 : 3x4 projection matrices
     Returns:
         X_refined: Nx3 refined 3D points
     """
@@ -291,3 +291,53 @@ def NonLinearTriangulation(X_init, pts1, pts2, P1, P2, max_iter=50):
         X_refined.append(res.x)
 
     return np.array(X_refined)
+
+def LinearPnP(X_3d, x_2d, K):
+    """ 
+    Solve for camera pose (C,R) from 2D-3D correspondences using 
+    a simple linear PnP
+    X_3d: Nx3
+    x_2d: Nx2
+    K: 3x3
+    Returns:
+        C: 3-vector (camera center)
+        R: 3x3 rotation
+    """
+    # Convert to normalized coordinates
+    # x_norm = inv(K) * x_2d_h
+    ones = np.ones((x_2d.shape[0], 1))
+    x_2d_h = np.hstack([x_2d, ones]).T # 3xN
+    x_norm = np.linalg.inv(K) @ x_2d_h # 3xN
+
+    #Build M in the equation M * [r1^T r2^T r3^T t]^T = 0
+    # or use the standard linear system approach
+    N = X_3d.shape[0]
+    M = []
+    for i in range(N):
+        X, Y, Z = X_3d[i]
+        u, v, w = x_norm[:,i] # w should be 1 after normalisation
+        M.append([X,Y,Z,1,0,0,0,0,-u*X,-u*Y,-u*Z,-u])
+        M.append([0,0,0,0,X,Y,Z,1, -v*X, -v*Y, -v*Z, -v])
+    M = np.array(M) #2N x12
+
+    _,_, Vt = np.linalg.svd(M)
+    P = Vt[-1]
+    P = P.reshape(3,4)
+
+    R_approx = P[:,:3]
+    t_approx = P[:, 3]
+
+    U, S, Vt = np.linalg.svd(R_approx)
+    R = U @ Vt
+    if np.linalg.det(R) < 0:
+        R = -R
+        t_approx = -t_approx
+
+    scale = np.mean(S)
+    t = t_approx/scale
+
+    C = -R.T @t
+
+    return C, R
+
+    

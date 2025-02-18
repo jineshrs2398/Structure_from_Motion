@@ -416,3 +416,99 @@ def compute_pnp_inliers(X_3d, x_2d, C, R, K, threshold):
     
     return inliers_mask
 
+def NonLinearPnP(X_3d, x_2d, C_init, R_init, K, max_iter=50):
+    """ 
+    Refine camera pose (C, R) that minimize reprojection error, given an initial guess.
+    For simplicity, er param by (rx, ry, rz) and (tx, ty, tz), i.e 6 parameters
+    A better approach is to param rotation as a quaterion.
+
+    X_3d: Nx3
+    x_2d: Nx2
+    C_init, R_init: initial guess
+    K: 3x3 
+    """
+    # Convert R_init to axis-angle or euler angles
+    # For simplicity, lets do naive Euler from R
+    def rot_to_euler(R):
+        sy = np.sqrt(R[0,0]*R[0,0] + R[1,0]*R[1,0])
+        if sy > 1e-6:
+            rx = np.arctan2(R[2,1], R[2,2])
+            ry = np.arctan2(-R[2,0], sy)
+            rz = np.arctan2(R[1,0], R[0,0])
+        else:
+            rx = np.arctan2(-R[1,2], R[1,1])
+            ry = np.arctan2(-R[2,0], sy)
+            rz = 0
+        return np.array([rx, ry, rz])
+    
+    def euler_to_rot(rx, ry, rz):
+        Rx = np.array([
+            [1, 0, 0],
+            [0, np.cos(rx), -np.sin(rx)],
+            [0, np.sin(rx), np.cos(rx)]
+        ])
+        Ry = np.array([
+            [np.cos(ry), 0, np.sin(ry)],
+            [0, 1, 0],
+            [-np.sin(ry), 0, np.cos(ry)]
+        ])
+        Rz = np.array([
+            [np.cos(rz), -np.sin(rz), 0],
+            [np.sin(rz), np.cos(rz), 0],
+            [0, 0, 1]
+        ])
+        R = Rz @ Ry @ Rx
+        return R
+    
+    #initial
+    eul_init = rot_to_euler(R_init)
+    c_init = C_init
+    param0 = np.hstack([c_init, eul_init])
+    
+    def projection_error(X_3d, x_2d, C, R, K):
+        N = X_3d.shape[0]
+        X_3d_h = np.hstack([X_3d, np.ones((N, 1))])
+
+        #Build P
+        C_col = C.reshape(3,1)
+        t = -R @ C_col
+        P = K @ np.hstack((R, t))
+
+        proj = (P @ X_3d_h.T).T
+        proj[:, 0] /= proj[:2]
+        proj[:, 1] /= proj[:2]
+        residuals = proj[:, :2] - x_2d
+        return residuals.ravel() # shape= 2N
+
+    def residual_func(params):
+        c = params[0:3]
+        rx, ry,rz = params[3:6]
+        R = euler_to_rot(rx, ry, rz)
+        return projection_error(X_3d, x_2d, c, R, K)
+    
+    # Optimize
+    res = least_squares(residual_func, param0, max_nfev=max_iter)
+    c_est = res.x[0:3]
+    rx, ry, rz = res.x[3:6]
+    R_est = euler_to_rot(rx, ry, rz)
+    return c_est, R_est
+
+def BuildVisibilityMatrix(matches_list, num_images, num_3d_points):
+    """ 
+    matches_list: data structure that indicates for each image i,
+        which 3D points are matched ( and the 2D location).
+        You can design your own structure or parse from your logic.
+    num_images: I
+    num_3d_points: J
+    Returns:
+        V: IxJ binary
+    """
+    V = np.zeros((num_images, num_3d_points), dtype=int)
+
+    #Suppose we have a structure like:
+    # matches_list[i] = list of (point3d_id, x, y) for that image i
+    # Then we mark visibility
+    for i in range(num_images):
+        for (pid, x, y) in matches_list[i]:
+            V[i, pid] = 1
+    return V

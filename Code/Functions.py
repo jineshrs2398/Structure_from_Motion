@@ -512,3 +512,40 @@ def BuildVisibilityMatrix(matches_list, num_images, num_3d_points):
         for (pid, x, y) in matches_list[i]:
             V[i, pid] = 1
     return V
+
+def BundleAdjustment(Cset, Rset, X3d, K, matches, V, max_iters=50):
+    """ 
+    A simplified global BA: we pack all camera poses and 3D points
+    into a single parameter vector, and solve with least_squares.
+
+    Cset: list of camera centers for i=0...I-1
+    Rset: list of rotations for i=0...I-1
+    X3d: Nx3 of 3D points
+    K: 3x3
+    matches: a structure describing the 2D observations for each (i,j)
+            e.g. matches[i][j] = (x, y) if V[i,j] = 1
+    V: IxN visibility matrix, V[i, j] in {0,1}
+    """
+    I = len(Cset)
+    N = X3d.shape[0]
+
+    #Flatten parameters
+    def rot_to_euler(R):
+        sy = np.sqrt(R[0,0]*R[0,0] + R[1,0]*R[1,0])
+        if sy > 1e-6:
+            rx = np.arctan2(R[2,1], R[2,2])
+            ry = np.arctan2(-R[2,0], sy)
+            rz = np.arctan2(R[1,0], R[0,0])
+        else:
+            rx = np.arctan2(-R[1,2], R[1,1])
+            ry = np.arctan2(-R[2,0], sy)
+            rz = 0
+        return np.array([rx, ry, rz])
+    
+    param_cameras = []
+    for i in range(I):
+        C = Cset[i]
+        R = Rset[i]
+        eul = rot_to_euler[R]
+        param_cameras.append(np.hstack([C, eul]))
+    param_cameras = np.concatenate(param_cameras)

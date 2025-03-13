@@ -513,7 +513,7 @@ def BuildVisibilityMatrix(matches_list, num_images, num_3d_points):
             V[i, pid] = 1
     return V
 
-def BundleAdjustment(Cset, Rset, X3d, K, matches, V, max_iters=50):
+def BundleAdjustment(Cset, Rset, X3d, K, matches, V, max_iter=50):
     """ 
     A simplified global BA: we pack all camera poses and 3D points
     into a single parameter vector, and solve with least_squares.
@@ -549,3 +549,77 @@ def BundleAdjustment(Cset, Rset, X3d, K, matches, V, max_iters=50):
         eul = rot_to_euler[R]
         param_cameras.append(np.hstack([C, eul]))
     param_cameras = np.concatenate(param_cameras)
+    param_points = X3d.ravel()
+
+    params0 = np.concatenate([param_cameras, param_points])
+
+    def unpack_params(params):
+        #cameras
+        cam_params = params[0:6*I]
+        pt_params = params[6*I:]
+        #reshape camera params
+        cameras = []
+        for i in range(I):
+            c = cam_params[6*i : 6*i + 3]
+            eul = cam_params[6*i + 3 : 6*i + 6]
+            cameras.append((c, eul))
+        #reshape 3d
+        points_3d = pt_params.reshape((N,3))
+        return cameras, points_3d
+    
+    def euler_to_rot(rx, ry, rz):
+        Rx = np.array([
+            [1, 0,      0],
+            [0, np.cos(rx), -np.sin(rx)],
+            [0, np.sin(rx), np.cos(rx)]
+        ])
+        Ry = np.array([
+            [ np.cos(ry), 0, np.sin(ry)],
+            [ 0,    1, 0],
+            [-np.sin(ry), 0, np.cos(ry)]
+        ])
+        Rz = np.array([
+            [np.cos(rz), -np.sin(rz), 0],
+            [np.sin(rz),  np.cos(rz), 0],
+            [0,           0,          1]
+        ])
+        return Rz @ Ry @ Rx
+    
+    def residual_function(params):
+        cameras, points_3d = unpack_params(params)
+        residuals = []
+        for i in range(I):
+            (c, eul) = cameras[i]
+            rx, ry, rz = eul
+            R = euler_to_rot(rx, ry, rz)
+            C_col = c.reshape(3,1)
+            t = -R @ C_col
+            P = K @ np.hstack((R,t))
+
+            for j in range(N):
+                if V[i, j] == 1:
+                    x_2d = matches[i][j]
+                    X = np.append(points_3d[j], 1)
+                    proj = P @ X
+                    proj /= proj[2]
+                    residuals.append(proj[0] - x_2d[0])
+                    residuals.append(proj[1] - x_2d[1])
+        return np.array(residuals)
+
+    # Run Optimization
+    result = least_squares(residual_function, params0, max_nfex= max_iter)
+
+    # Unpaack final results
+    cameras_opt, points_opt = unpack_params(result.x)
+    Cset_opt = []
+    Rset_opt = []
+    for i in range(I):
+        c, eul = cameras_opt[i]
+        rx, ry, rz = eul
+        R = euler_to_rot(rx, ry, rz)
+        Cset_opt.append(c)
+        Rset_opt.append(R)
+
+    X3d_opt = points_opt
+
+    return Cset_opt, Rset_opt, X3d_opt

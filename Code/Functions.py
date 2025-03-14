@@ -1,5 +1,6 @@
 import numpy as np
 from scipy.optimize import least_squares
+import os
 
 def EstimateFundamentalMatrix(pts1, pts2):
     """
@@ -18,9 +19,9 @@ def EstimateFundamentalMatrix(pts1, pts2):
         mean = np.mean(pts, axis=0) #cols
         std = np.std(pts, axis=0)
         T = np.array([
-            [1/std[0], 0, -mean[0]/std[0]],
-            [0, 1/std[1], -mean/std[1]],
-            [0, 0, 1]
+        [1/std[0],          0,      -mean[0]/std[0]],
+        [0,         1/std[1],        -mean/std[1]],
+        [0,              0,                  1]
         ])
         pts_h = np.hstack([pts, np.ones((pts.shape[0], 1))])
         pts_norm = np.matmul(T, pts_h.T).T # transformation matrix T is designed to operate on column vectors
@@ -147,36 +148,29 @@ def ExtractCameraPose(E):
                   [0, 0, 1]])
     
     R1 = U @ W @ Vt
-    R2 = U @ W @ Vt
-    R3 = U @ W.T @ Vt
-    R4 = U @ W.T @ Vt
+    R2 = U @ W.T @ Vt
 
     C1 = U[:,2]
     C2 = -U[:,2]
-    C3 = U[:,2]
-    C4 = -U[:,2]
-
-    if np.linalg.det(R1) < 0:
-        R1 = -R1
-        C1 = -C1
-    if np.linalg.det(R2) < 0:
-        R2 = -R2
-        C2 = -C2
-    if np.linalg.det(R3) < 0:
-        R3 = -R3
-        C3 = -C3
-    if np.linalg.det(R4) < 0:
-        R4 = -R4
-        C4 = -C4
 
     possible_poses = [
         (C1, R1),
-        (C2, R2),
-        (C3, R3),
-        (C4, R4)
+        (C2, R1),
+        (C1, R2),
+        (C2, R2)
     ]
 
-    return possible_poses
+
+    # Fix orientation if det(R) < 0
+    out_poses = []
+    for (C, R) in possible_poses:
+        if np.linalg.det(R) < 0:
+            R = -R
+            C = -C
+        out_poses.append((C, R))
+
+    return out_poses
+
 
 def LinearTriangulation(pts1, pts2, P1, P2):
     """
@@ -192,10 +186,12 @@ def LinearTriangulation(pts1, pts2, P1, P2):
         x1, y1 = pts1[i]
         x2, y2 = pts2[i]
 
-        A = np.vstack[x1*P1[:,2] - P1[:,0], 
-                      y1*P1[:,2] - P1[:,0],
-                      x2*P2[:,2] - P2[:,1],
-                      y2*P2[:,2] - P2[:,1]]
+        A = np.vstack([
+            x1 * P1[2,:] - P1[0,:],
+            y1 * P1[2,:] - P1[1,:],
+            x2 * P2[2,:] - P2[0,:],
+            y2 * P2[2,:] - P2[1,:]
+        ])
         
         # solve for X in AX = 0 using SVD
         _, _, Vt = np.linalg.svd(A)
@@ -271,7 +267,7 @@ def NonLinearTriangulation(X_init, pts1, pts2, P1, P2, max_iter=50):
         #Reproject to image 2
         proj2 = P2 @ X_h
         proj2 /= proj2[2]
-        err2 = proj2[2] - x2
+        err2 = proj2[:2] - x2
 
         return np.concatenate([err1, err2])
     
@@ -321,8 +317,7 @@ def LinearPnP(X_3d, x_2d, K):
     M = np.array(M) #2N x12
 
     _,_, Vt = np.linalg.svd(M)
-    P = Vt[-1]
-    P = P.reshape(3,4)
+    P = Vt[-1].reshape(3,4)
 
     R_approx = P[:,:3]
     t_approx = P[:, 3]
@@ -340,9 +335,35 @@ def LinearPnP(X_3d, x_2d, K):
     scale = np.mean(S)
     t = t_approx/scale
 
-    C = -R.T @t
+    C = -R.T @ t
 
     return C, R
+
+def compute_pnp_inliers(X_3d, x_2d, C, R, K, threshold):
+    """ 
+    Compute which 2D-3D correspondences are inliers
+    by projecting X_3d into the camera (C,R) and
+    checking distance to x_2d in pixels
+    """
+    N = X_3d.shape[0]
+    X_3d_h = np.hstack([X_3d, np.ones((N, 1))])
+
+    # Build projection P = K[R | -R*C]
+    C_col = C.reshape(3,1)
+    t = -R @ C_col
+    P = K @ np.hstack((R, t))
+
+    #Project
+    proj = (P @ X_3d_h.T).T
+    proj[:,0] /= proj[:2]
+    proj[:,1] /= proj[:2]
+
+    # Compare with x_2d
+    diff = proj[:,:2] - x_2d
+    errors = np.linalg.norm(diff, axis=1)
+    inliers_mask = errors < threshold
+    
+    return inliers_mask
 
 def PnPRANSAC(X_3d, x_2d, K, threshold=3.0, max_iters=1000):
     """ 
@@ -389,32 +410,6 @@ def PnPRANSAC(X_3d, x_2d, K, threshold=3.0, max_iters=1000):
         best_C, best_R = LinearPnP(X_in, x_in, K)
 
     return best_C, best_R, best_mask 
-
-def compute_pnp_inliers(X_3d, x_2d, C, R, K, threshold):
-    """ 
-    Compute which 2D-3D correspondences are inliers
-    by projecting X_3d into the camera (C,R) and
-    checking distance to x_2d in pixels
-    """
-    N = X_3d.shape[0]
-    X_3d_h = np.hstack([X_3d, np.ones((N, 1))])
-
-    # Build projection P = K[R | -R*C]
-    C_col = C.reshape(3,1)
-    t = -R @ C_col
-    P = K @ np.hstack((R, t))
-
-    #Project
-    proj = (P @ X_3d_h.T).T
-    proj[:,0] /= proj[:2]
-    proj[:,1] /= proj[:2]
-
-    # Compare with x_2d
-    diff = proj[:,:2] - x_2d
-    errors = np.linalg.norm(diff, axis=1)
-    inliers_mask = errors < threshold
-    
-    return inliers_mask
 
 def NonLinearPnP(X_3d, x_2d, C_init, R_init, K, max_iter=50):
     """ 
@@ -623,3 +618,375 @@ def BundleAdjustment(Cset, Rset, X3d, K, matches, V, max_iter=50):
     X3d_opt = points_opt
 
     return Cset_opt, Rset_opt, X3d_opt
+
+
+def run_sfm_pipeline():
+    """
+    End-to-end pipeline to reconstruct a scene from 5 images of Unity Hall,
+    using classical SfM steps:
+      1) Load camera intrinsics from 'calibration.txt'
+      2) Read pairwise matches from matching1..4.txt
+      3) Bootstrap with images 1 & 2:
+         - RANSAC => F
+         - E = K^T F K
+         - Extract 4 camera poses from E
+         - Disambiguate by triangulation => pick best (C2, R2)
+         - LinearTriangulation => initial 3D points
+         - NonlinearTriangulation => refine 3D points
+      4) For each new image (3,4,5):
+         - Find 2D-3D correspondences
+         - Solve with PnPRANSAC => get (C, R)
+         - NonLinearPnP => refine (C, R)
+         - Triangulate new 3D points if available
+         - NonlinearTriangulation for newly added points
+      5) Build Visibility Matrix
+      6) Bundle Adjustment => refine all cameras and 3D points
+      7) Save or visualize final results
+    """
+
+    # ------------------------------------------------
+    # 1) Load intrinsics
+    # ------------------------------------------------
+    K = np.loadtxt("Data/calibration.txt")  # shape should be (3,3)
+
+    # ------------------------------------------------
+    # 2) Read pairwise matches from matching files
+    # ------------------------------------------------
+    # We have matching1.txt, matching2.txt, matching3.txt, matching4.txt
+    # matching1 => I1->I2, I1->I3, I1->I4, I1->I5
+    # matching2 => I2->I3, I2->I4, I2->I5
+    # matching3 => I3->I4, I3->I5
+    # matching4 => I4->I5
+    #
+    # We'll parse them into a dictionary: matches[(i,j)] = (pts_i, pts_j)
+    # NOTE: The actual file format is more complex. Here we show a *schematic* parser.
+    #
+    matches = {}
+    def parse_matching_file(filename, base_image_id):
+        """
+        A schematic parser that reads matchingX.txt
+        and extracts correspondences from the 'base_image_id' to subsequent images.
+        We return a dictionary of the form:
+             {
+               (base_image_id, next_img_id): (pts_base, pts_next),
+               ...
+             }
+        """
+        local_dict = {}
+        # Example reading logic (pseudo-code):
+        if not os.path.exists(filename):
+            return local_dict
+
+        with open(filename, "r") as f:
+            lines = f.readlines()
+
+        # lines[0] might be: "nFeatures: 3930"
+        # subsequent lines describe features in base_image_id that match other images
+        # YOU need to parse carefully. We'll show a naive approach.
+        idx = 0
+        # skip first line if it starts with 'nFeatures:' 
+        if lines[idx].startswith('nFeatures'):
+            idx += 1
+
+        while idx < len(lines):
+            row = lines[idx].strip().split()
+            idx += 1
+            if len(row) < 7:
+                continue
+
+            n_matches = int(row[0])
+            # row[1:4] => R,G,B (can ignore or store)
+            # row[4], row[5] => (u, v) in base_image
+            u_base = float(row[4])
+            v_base = float(row[5])
+
+            # Then pairs: (image_id, u, v) repeated n_matches times
+            # row has length = 6 + 3*n_matches
+            # so we read from row[6..]
+            sub_idx = 6
+            for _ in range(n_matches):
+                im_id = int(row[sub_idx])
+                x_match = float(row[sub_idx + 1])
+                y_match = float(row[sub_idx + 2])
+                sub_idx += 3
+
+                # We'll store the match base_image_id <-> im_id
+                # We'll accumulate them in a local structure so we can combine them
+                pair_key = (base_image_id, im_id)
+                if pair_key not in local_dict:
+                    local_dict[pair_key] = [[], []]  # [pts_base, pts_other]
+
+                local_dict[pair_key][0].append([u_base, v_base])
+                local_dict[pair_key][1].append([x_match, y_match])
+        
+        # convert lists to np.array
+        out_dict = {}
+        for k in local_dict.keys():
+            arr_base = np.array(local_dict[k][0], dtype=float)
+            arr_other = np.array(local_dict[k][1], dtype=float)
+            out_dict[k] = (arr_base, arr_other)
+
+        return out_dict
+
+    # parse each matching file
+    dict1 = parse_matching_file("Data/matching1.txt", base_image_id=1)
+    dict2 = parse_matching_file("Data/matching2.txt", base_image_id=2)
+    dict3 = parse_matching_file("Data/matching3.txt", base_image_id=3)
+    dict4 = parse_matching_file("Data/matching4.txt", base_image_id=4)
+
+    # merge them all into 'matches'
+    for d in [dict1, dict2, dict3, dict4]:
+        for key in d.keys():
+            matches[key] = d[key]  # (pts_i, pts_j)
+
+    # Now we have matches[(1,2)], matches[(1,3)], etc. up to matches[(4,5)].
+
+    # ------------------------------------------------
+    # 3) Pick images 1 & 2 for bootstrapping
+    # ------------------------------------------------
+
+    # Retrieve the correspondences between images 1 and 2
+    if (1, 2) not in matches:
+        raise ValueError("No matches found for (1,2). Cannot bootstrap!")
+    pts1, pts2 = matches[(1,2)]  # Nx2, Nx2
+
+    # 3a) Estimate F (via RANSAC)
+    F_12, inliers1, inliers2 = GetInlierRANSAC(pts1, pts2, threshold=0.001, max_iters=2000)
+
+    # 3b) Compute E
+    E_12 = EssentialMatrixFromFundamentalMatrix(F_12, K)
+
+    # 3c) Extract 4 possible camera poses
+    possible_poses = ExtractCameraPose(E_12)
+
+    # 3d) Disambiguate by triangulation + cheirality
+    C2, R2, X_3d_lin = DisambiguateCameraPose(possible_poses, inliers1, inliers2, K)
+
+    # 3e) Nonlinear triangulation to refine 3D
+    P1 = K @ np.hstack((np.eye(3), np.zeros((3,1))))
+    t2 = -R2 @ C2.reshape(3,1)
+    P2 = K @ np.hstack((R2, t2))
+    X_3d = NonLinearTriangulation(X_3d_lin, inliers1, inliers2, P1, P2)
+
+    # Initialize camera poses:
+    #   The first camera is at the origin (C1=[0,0,0], R1=I).
+    Cset = [np.zeros(3), C2]  # for images 1 and 2
+    Rset = [np.eye(3), R2]
+
+    # We'll store the 3D points from inliers of (1,2). We also need some indexing
+    # for these points. For simplicity, let's store them in a big array.
+    X_global = X_3d.copy()  # Nx3
+
+    # We'll also track which 2D points correspond to which row in X_global
+    # For example, 'pt_index_12[i]' = index in X_global for inliers1[i], inliers2[i].
+    pt_index_12 = np.arange(X_global.shape[0])  # 0..N-1
+
+    # We also keep track of which images have these points. For example:
+    #   image 1 sees them at inliers1, image 2 sees them at inliers2.
+    # In a robust pipeline, you'd store a big table of 2D observations of each 3D point.
+    # We'll keep it minimal here.
+    # Let's define a dictionary storing the 2D observations:
+    # obs[ (img_id, point_id) ] = (u, v)
+    obs = {}
+    for i in range(X_global.shape[0]):
+        obs[(1, i)] = inliers1[i]  # in image #1
+        obs[(2, i)] = inliers2[i]  # in image #2
+
+    # ------------------------------------------------
+    # 4) For each new image i = 3, 4, 5:
+    #    - Identify the 2D-3D correspondences
+    #    - PnPRANSAC => (C_i, R_i)
+    #    - NonLinearPnP => refine (C_i, R_i)
+    #    - Triangulate new points that appear in i with previously registered cameras
+    #    - NonlinearTriangulation of newly added points
+    # ------------------------------------------------
+
+    current_num_points = X_global.shape[0]
+    for new_img_id in [3, 4, 5]:
+        # 4a) Identify which matches exist: we have matches with cameras already in {1,2}
+        #     We collect 2D-3D correspondences from any existing 3D points
+        #     i.e. if (1, new_img_id) is in matches, we find all correspondences that match
+        #     a known 3D point. We do the same for (2, new_img_id).
+        known_3d = []
+        known_2d = []
+
+        for reg_img_id in range(1, new_img_id):
+            if (reg_img_id, new_img_id) in matches:
+                base_pts, new_pts = matches[(reg_img_id, new_img_id)]
+                # We want to see if each base_pts is among the observations from reg_img_id
+                # We do a small approximate matching: for each base_pt, we see if it matches
+                # something we stored in obs for (reg_img_id, ?).
+                # In a real system, you’d likely keep track of a feature index or do direct dictionary lookup.
+
+                for match_i, (bx, by) in enumerate(base_pts):
+                    # we check each 3D point that image reg_img_id sees. 
+                    # We'll do a naive "closest point" approach as an example:
+                    # (In real code, you'd keep a robust index from the prior pipeline.)
+                    best_3d_id = None
+                    best_dist = 1e10
+                    for (k_img, k_ptid) in obs.keys():
+                        if k_img == reg_img_id:
+                            # Compare with obs[(reg_img_id, k_ptid)]
+                            (ox, oy) = obs[(k_img, k_ptid)]
+                            dist = np.hypot(ox - bx, oy - by)
+                            if dist < best_dist:
+                                best_dist = dist
+                                best_3d_id = k_ptid
+
+                    # if the best_dist is small => we consider them the same 2D feature
+                    if best_dist < 3.0:  # some threshold in pixels
+                        # that means we have a known 3D point:
+                        known_3d.append(X_global[best_3d_id])
+                        # the new image's 2D coordinate is new_pts[match_i]
+                        (ux, uy) = new_pts[match_i]
+                        known_2d.append([ux, uy])
+
+            # Similarly, if (new_img_id, reg_img_id) is in matches, parse them
+            elif (new_img_id, reg_img_id) in matches:
+                new_pts, base_pts = matches[(new_img_id, reg_img_id)]
+                # similar logic as above, reversed roles
+                for match_i, (nx, ny) in enumerate(new_pts):
+                    best_3d_id = None
+                    best_dist = 1e10
+                    for (k_img, k_ptid) in obs.keys():
+                        if k_img == reg_img_id:
+                            (ox, oy) = obs[(k_img, k_ptid)]
+                            dist = np.hypot(ox - nx, oy - ny)
+                            if dist < best_dist:
+                                best_dist = dist
+                                best_3d_id = k_ptid
+
+                    if best_dist < 3.0:
+                        known_3d.append(X_global[best_3d_id])
+                        (ux, uy) = base_pts[match_i]
+                        known_2d.append([ux, uy])
+
+        known_3d = np.array(known_3d)
+        known_2d = np.array(known_2d)
+        if known_3d.shape[0] < 6:
+            # We need at least 6 to run linear PnP
+            print(f"Not enough 2D-3D correspondences for image {new_img_id}. Skipping it.")
+            # We'll store dummy pose
+            Cset.append(np.zeros(3))
+            Rset.append(np.eye(3))
+            continue
+
+        # 4b) Solve PnPRANSAC => (C_i, R_i)
+        C_init, R_init, inliers_mask = PnPRANSAC(known_3d, known_2d, K, threshold=3.0, max_iters=1000)
+
+        # 4c) Nonlinear PnP => refine
+        X_in = known_3d[inliers_mask]
+        x_in = known_2d[inliers_mask]
+        C_ref, R_ref = NonLinearPnP(X_in, x_in, C_init, R_init, K, max_iter=50)
+
+        # Save camera pose
+        Cset.append(C_ref)
+        Rset.append(R_ref)
+
+        # 4d) Triangulate new points that appear in new_img_id with old cameras
+        # We'll loop over all reg_img_id in [1..(new_img_id-1)], take matches,
+        # and for each match that is not yet in 3D, we do a 2-view triangulation
+        # from (reg_img_id, new_img_id).
+        # Then we optionally refine those new 3D points with NonlinearTriangulation.
+        # For brevity, let's just do it with the FIRST camera we already have, e.g. camera 1.
+
+        if (1, new_img_id) in matches:
+            old_pts, new_pts = matches[(1, new_img_id)]
+            P_old = K @ np.hstack((np.eye(3), np.zeros((3,1))))  # for camera 1
+            t_new = -R_ref @ C_ref.reshape(3,1)
+            P_new = K @ np.hstack((R_ref, t_new))
+            # Triangulate
+            X_new_lin = LinearTriangulation(old_pts, new_pts, P_old, P_new)
+            # Nonlinear refine
+            X_new = NonLinearTriangulation(X_new_lin, old_pts, new_pts, P_old, P_new, max_iter=50)
+            # Append to X_global
+            base_idx_start = X_global.shape[0]
+            X_global = np.vstack([X_global, X_new])
+            # Update obs to store 2D observation in image1 and new_img_id
+            for irow in range(X_new.shape[0]):
+                ptid = base_idx_start + irow
+                obs[(1, ptid)] = old_pts[irow]
+                obs[(new_img_id, ptid)] = new_pts[irow]
+
+        elif (new_img_id, 1) in matches:
+            new_pts, old_pts = matches[(new_img_id, 1)]
+            P_old = K @ np.hstack((np.eye(3), np.zeros((3,1))))  # camera 1
+            t_new = -R_ref @ C_ref.reshape(3,1)
+            P_new = K @ np.hstack((R_ref, t_new))
+            X_new_lin = LinearTriangulation(old_pts, new_pts, P_old, P_new)
+            X_new = NonLinearTriangulation(X_new_lin, old_pts, new_pts, P_old, P_new, max_iter=50)
+            base_idx_start = X_global.shape[0]
+            X_global = np.vstack([X_global, X_new])
+            for irow in range(X_new.shape[0]):
+                ptid = base_idx_start + irow
+                obs[(1, ptid)] = old_pts[irow]
+                obs[(new_img_id, ptid)] = new_pts[irow]
+
+        # In a real pipeline, you'd do the above for all previously registered cameras, not just camera 1.
+
+    # ------------------------------------------------
+    # 5) Build Visibility Matrix
+    # ------------------------------------------------
+    # We have I=5 cameras and N=X_global.shape[0] points
+    I = 5
+    N = X_global.shape[0]
+    # We'll build 'matches_list' as required by BuildVisibilityMatrix
+    # matches_list[i] should be a list of (pt_id, u, v) for each 3D point observed by camera i+1
+    # (Because we used i+1 as camera ID in the code above)
+    matches_list = [[] for _ in range(I)]  # i=0..4 => camera 1..5
+    for (img_id, pt_id) in obs.keys():
+        # store into matches_list[img_id - 1]
+        (ux, vy) = obs[(img_id, pt_id)]
+        matches_list[img_id - 1].append((pt_id, ux, vy))
+
+    V = BuildVisibilityMatrix(matches_list, num_images=I, num_3d_points=N)
+
+    # ------------------------------------------------
+    # 6) Bundle Adjustment
+    # ------------------------------------------------
+    # Cset, Rset so far => lists of length 5
+    # X_global => Nx3
+    # We'll need 'matches' argument that has, for each camera i, for each point j in V[i,j]==1, the 2D coords
+    # We'll build 'matches_for_ba' as a list-of-lists: matches_for_ba[i][j] = (u, v) or None
+    # Or we can do something simpler if your existing BundleAdjustment code expects
+    # matches[i][j] to be 2D coords.
+
+    # We'll build matches_for_ba as a list of length I, each of size N, storing (u, v)
+    # or dummy if not visible.
+    matches_for_ba = []
+    for i_cam in range(I):
+        row = []
+        for j_pt in range(N):
+            if V[i_cam, j_pt] == 1:
+                # find the obs
+                row.append(obs[(i_cam+1, j_pt)])
+            else:
+                row.append(None)
+        matches_for_ba.append(row)
+
+    # The user’s BundleAdjustment function might want them as row[j] = (u, v) or something.
+    # We'll convert None -> (0,0) if code does not handle None:
+    # (Adjust as needed for your function's signature)
+    for i_cam in range(I):
+        for j_pt in range(N):
+            if matches_for_ba[i_cam][j_pt] is None:
+                matches_for_ba[i_cam][j_pt] = (0., 0.)  # or dummy
+
+    # Now run BA
+    Cset_opt, Rset_opt, X_opt = BundleAdjustment(Cset, Rset, X_global, K,
+                                                matches_for_ba, V, max_iter=50)
+
+    # ------------------------------------------------
+    # 7) Save or visualize
+    # ------------------------------------------------
+    print("==== Final Results ====")
+    for i_cam in range(I):
+        print(f"Camera {i_cam+1} center = {Cset_opt[i_cam]}")
+        print(f"Camera {i_cam+1} rotation = \n{Rset_opt[i_cam]}")
+    print("Sample of final 3D points:\n", X_opt[:5])
+
+    # Done. We have refined Cset_opt, Rset_opt, X_opt for the 5 images.
+
+
+if __name__ == "__main__":
+    run_sfm_pipeline()
